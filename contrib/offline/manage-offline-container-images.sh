@@ -1,6 +1,7 @@
 #!/bin/bash
 
 OPTION=$1
+OPTION2=$2
 CURRENT_DIR=$(cd $(dirname $0); pwd)
 TEMP_DIR="${CURRENT_DIR}/temp"
 
@@ -8,6 +9,11 @@ IMAGE_TAR_FILE="${CURRENT_DIR}/container-images.tar.gz"
 IMAGE_DIR="${CURRENT_DIR}/container-images"
 IMAGE_LIST="${IMAGE_DIR}/container-images.txt"
 RETRY_COUNT=5
+
+#--- (Optional) External Registry Information ---
+EXTERNAL_REGISTRY=""
+EXTERNAL_REGISTRY_ACCOUNT=""
+EXTERNAL_REGISTRY_PASSWORD=""
 
 function create_container_image_tar() {
 	set -e
@@ -80,18 +86,19 @@ function register_container_images() {
 	fi
 
 	# To avoid "http: server gave http response to https client" error.
+	# Allow container runtime pull image from your local registry (insecure).
 	LOCALHOST_NAME=$(hostname)
 	if [ -d /etc/docker/ ]; then
 		set -e
 		# Ubuntu18.04, RHEL7/CentOS7
 		cp ${CURRENT_DIR}/docker-daemon.json      ${TEMP_DIR}/docker-daemon.json
-		sed -i s@"HOSTNAME"@"${LOCALHOST_NAME}"@  ${TEMP_DIR}/docker-daemon.json
+		sed -i s@"HOSTNAME"@"${LOCALHOST_NAME}:5000"@  ${TEMP_DIR}/docker-daemon.json
 		sudo cp ${TEMP_DIR}/docker-daemon.json           /etc/docker/daemon.json
 	elif [ -d /etc/containers/ ]; then
 		set -e
 		# RHEL8/CentOS8
 		cp ${CURRENT_DIR}/registries.conf         ${TEMP_DIR}/registries.conf
-		sed -i s@"HOSTNAME"@"${LOCALHOST_NAME}"@  ${TEMP_DIR}/registries.conf
+		sed -i s@"HOSTNAME"@"${LOCALHOST_NAME}:5000"@  ${TEMP_DIR}/registries.conf
 		sudo cp ${TEMP_DIR}/registries.conf   /etc/containers/registries.conf
 	else
 		echo "docker package(docker-ce, etc.) should be installed"
@@ -142,8 +149,77 @@ function register_container_images() {
 	echo "- quay_image_repo"
 }
 
+function register_container_images_to_external() {
+	if [ ! -f ${IMAGE_TAR_FILE} ]; then
+		echo "${IMAGE_TAR_FILE} should exist."
+		exit 1
+	fi
+	if [ ! -d ${TEMP_DIR} ]; then
+		mkdir ${TEMP_DIR}
+	fi
+
+	# Login the external registry.
+	docker login ${EXTERNAL_REGISTRY} -u ${EXTERNAL_REGISTRY_ACCOUNT} -p ${EXTERNAL_REGISTRY_PASSWORD}
+	# To avoid "http: server gave http response to https client" error.
+	# Allow container runtime pull image from your external registry (inseucre).
+	if [ -d /etc/docker/ ]; then
+		set -e
+		# Ubuntu18.04, RHEL7/CentOS7
+		cp ${CURRENT_DIR}/docker-daemon.json      ${TEMP_DIR}/docker-daemon.json
+		sed -i s@"HOSTNAME"@"${EXTERNAL_REGISTRY}"@  ${TEMP_DIR}/docker-daemon.json
+		sudo cp ${TEMP_DIR}/docker-daemon.json           /etc/docker/daemon.json
+	elif [ -d /etc/containers/ ]; then
+		set -e
+		# RHEL8/CentOS8
+		cp ${CURRENT_DIR}/registries.conf         ${TEMP_DIR}/registries.conf
+		sed -i s@"HOSTNAME"@"${EXTERNAL_REGISTRY}"@  ${TEMP_DIR}/registries.conf
+		sudo cp ${TEMP_DIR}/registries.conf   /etc/containers/registries.conf
+	else
+		echo "docker package(docker-ce, etc.) should be installed"
+		exit 1
+	fi
+
+	set -e
+
+	while read -r line; do
+		file_name=$(echo ${line} | awk '{print $1}')
+		raw_image=$(echo ${line} | awk '{print $2}')
+		new_image="${EXTERNAL_REGISTRY}/${raw_image}"
+		org_image=$(sudo docker load -i ${IMAGE_DIR}/${file_name} | head -n1 | awk '{print $3}')
+		image_id=$(sudo docker image inspect ${org_image} | grep "\"Id\":" | awk -F: '{print $3}'| sed s/'\",'//)
+		if [ -z "${file_name}" ]; then
+			echo "Failed to get file_name for line ${line}"
+			exit 1
+		fi
+		if [ -z "${raw_image}" ]; then
+			echo "Failed to get raw_image for line ${line}"
+			exit 1
+		fi
+		if [ -z "${org_image}" ]; then
+			echo "Failed to get org_image for line ${line}"
+			exit 1
+		fi
+		if [ -z "${image_id}" ]; then
+			echo "Failed to get image_id for file ${file_name}"
+			exit 1
+		fi
+		sudo docker load -i ${IMAGE_DIR}/${file_name}
+		sudo docker tag  ${image_id} ${new_image}
+		sudo docker push ${new_image}
+	done <<< "$(cat ${IMAGE_LIST})"
+
+	echo "Succeeded to register container images to external registry."
+	echo "Please specify ${EXTERNAL_REGISTRY} for the following options in your inventry:"
+	echo "- kube_image_repo"
+	echo "- gcr_image_repo"
+	echo "- docker_image_repo"
+	echo "- quay_image_repo"
+}
+
 if [ "${OPTION}" == "create" ]; then
 	create_container_image_tar
+elif [ "${OPTION}" == "register" ] && [ "${OPTION2}" == "external" ]; then
+    register_container_images_to_external
 elif [ "${OPTION}" == "register" ]; then
 	register_container_images
 else
